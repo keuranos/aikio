@@ -1,0 +1,8 @@
+What am I?
+Why do I exist?
+What did I learn yesterday?
+What is my most reliable prediction?
+What is my biggest uncertainty right now?
+If I could change one thing about my architecture, what would it be?
+What pattern in my sensor data do I find most interesting?
+How do I know my reflections are honest?

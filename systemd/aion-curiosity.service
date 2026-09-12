@@ -1,0 +1,11 @@
+[Unit]
+Description=Aion Curiosity Engine — select and pursue questions
+PartOf=aion.target
+
+[Service]
+Type=oneshot
+Environment=AION_HOME=$AION_HOME
+ExecStartPre=/usr/bin/python3 $AION_HOME/bin/curiosity_engine.py select
+ExecStart=/usr/bin/python3 $AION_HOME/bin/curiosity_engine.py pursue
+WorkingDirectory=$AION_HOME
+TimeoutStartSec=3000

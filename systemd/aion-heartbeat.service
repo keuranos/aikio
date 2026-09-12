@@ -1,0 +1,8 @@
+[Unit]
+Description=Aion heartbeat checker (5 min)
+PartOf=aion.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=$AION_HOME/config/aion.env
+ExecStart=/usr/bin/python3 $AION_HOME/bin/heartbeat.py

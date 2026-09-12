@@ -1,0 +1,20 @@
+[Unit]
+Description=Aion J-space introspection daemon (lazy load, V100 #1, :11440)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/jlens-work
+ExecStart=%h/jlens-venv/bin/python %h/aion/bin/jspace_probe.py
+Restart=on-failure
+RestartSec=30
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID
+Environment=CUDA_VISIBLE_DEVICES=GPU-f942baa1-6339-5dc9-769b-6f74ff09ab5f
+Environment=JSPACE_DEVICE=cuda:0
+Environment=JSPACE_GPU_INDEX=GPU-f942baa1-6339-5dc9-769b-6f74ff09ab5f
+Environment=JSPACE_PORT=11440
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

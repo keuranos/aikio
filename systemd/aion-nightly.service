@@ -1,0 +1,11 @@
+[Unit]
+Description=Aion nightly consolidation + graph rebuild
+PartOf=aion.target
+After=aion-ollama-main.service aion-ollama-sub.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=$AION_HOME/config/aion.env
+Environment=PATH=/home/operator/miniconda3/bin:/home/operator/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/bash $AION_HOME/bin/nightly.sh
+TimeoutStartSec=4h

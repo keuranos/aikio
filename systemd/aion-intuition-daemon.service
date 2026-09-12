@@ -1,0 +1,17 @@
+[Unit]
+Description=Aion intuition daemon — homeostasis + creative synthesis
+PartOf=aion.target
+After=network-online.target aion-sensor-stream.service
+
+[Service]
+Type=simple
+EnvironmentFile=$AION_HOME/config/aion.env
+WorkingDirectory=$AION_HOME/bin
+ExecStart=/usr/bin/python3 $AION_HOME/bin/intuition_daemon.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=aion.target

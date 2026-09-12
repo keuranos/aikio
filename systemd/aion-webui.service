@@ -1,0 +1,16 @@
+[Unit]
+Description=Aion live dashboard server (Tailscale-only)
+PartOf=aion.target
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=$AION_HOME/config/aion.env
+WorkingDirectory=$AION_HOME
+ExecStart=/usr/bin/python3 $AION_HOME/bin/aion_dashboard_server.py --port 8115 --host $TAILSCALE_IP
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=aion.target

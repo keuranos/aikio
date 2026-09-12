@@ -1,0 +1,12 @@
+[Unit]
+Description=Aion Dream Cycle v2 — graph walk + synthesis
+PartOf=aion.target
+
+[Service]
+Type=oneshot
+Environment=AION_HOME=$AION_HOME
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 $AION_HOME/bin/dream_v2.py
+WorkingDirectory=$AION_HOME
+TimeoutStartSec=2400
+KillMode=process

@@ -1,0 +1,14 @@
+[Unit]
+Description=Aion graphify MCP server
+PartOf=aion.target
+After=aion-ollama-sub.service
+
+[Service]
+Type=simple
+EnvironmentFile=$AION_HOME/config/aion.env
+Environment=PATH=/home/operator/miniconda3/bin:/home/operator/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/operator/miniconda3/bin/python3 -m graphify.serve $AION_HOME/graphs/mind/graphify-out/graph.json --transport http --port 8090
+Restart=on-failure
+
+[Install]
+WantedBy=aion.target

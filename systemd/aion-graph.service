@@ -1,0 +1,11 @@
+[Unit]
+Description=Aion graph rebuild (mind + body graph, 01:00)
+PartOf=aion.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=$AION_HOME/config/aion.env
+Environment=PATH=/home/operator/miniconda3/bin:/home/operator/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=$AION_HOME
+ExecStart=/usr/bin/bash $AION_HOME/bin/graph_rebuild.sh
+TimeoutStartSec=3h
