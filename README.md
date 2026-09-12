@@ -81,6 +81,9 @@ compute, and commit only instrument-grounded self-knowledge.
 | `bin/predictions.py`, `bin/eval_heuristics.py` | calibrated predictions, heuristic eval | P1 §Governance |
 | `AXIOMS.md.unleashed` | Experiment 1 treatment axiom | P1 §Exp 1 design |
 | `bin/regenerate_prompt.py` | nightly SYSTEM_PROMPT rebuild | P1 §Memory |
+| `bin/substrate_composition.py` | GPU telemetry → audible structure | P1 §Art / sonic |
+
+The dream→artifact pipeline (FLUX / matplotlib / manim / AceStep) and `fitctl` are described in [`docs/PIPELINE.md`](docs/PIPELINE.md) with upstream links — `fitctl` itself is public at [github.com/tznurmin/fitctl](https://github.com/tznurmin/fitctl) (crates.io `fitctl`).
 
 (`P1`/`P2` = the papers in [`aion-jspace`](https://github.com/keuranos/aion-jspace).)
 
