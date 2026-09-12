@@ -26,6 +26,7 @@ aikio/
 ├── identity/                 # see top level: AXIOMS.md, HABITS.md, HEURISTICS.md
 ├── config/aion.env.example   # all 32 config keys, placeholder values
 ├── systemd/                  # 9 core units + timers (paths parametrized)
+├── artifacts/                # dream→artifact pipeline: FLUX, matplotlib, AceStep, cross-modal (9 modules)
 ├── AXIOMS.md                 # agent constitution (immutable, operator-edited only)
 ├── AXIOMS.md.unleashed       # the Experiment 1 treatment axiom
 ├── SELF.md                   # EXAMPLE evolving self-model (Aion's, redacted)
@@ -81,6 +82,7 @@ compute, and commit only instrument-grounded self-knowledge.
 | `bin/predictions.py`, `bin/eval_heuristics.py` | calibrated predictions, heuristic eval | P1 §Governance |
 | `AXIOMS.md.unleashed` | Experiment 1 treatment axiom | P1 §Exp 1 design |
 | `bin/regenerate_prompt.py` | nightly SYSTEM_PROMPT rebuild | P1 §Memory |
+| `artifacts/dream_artifact.py` (+FLUX/matplotlib/AceStep/cross-modal) | dream→artifact pipeline, art-learning loop | P1 §Art pipeline |
 | `bin/substrate_composition.py` | GPU telemetry → audible structure | P1 §Art / sonic |
 
 The dream→artifact pipeline (FLUX / matplotlib / manim / AceStep) and `fitctl` are described in [`docs/PIPELINE.md`](docs/PIPELINE.md) with upstream links — `fitctl` itself is public at [github.com/tznurmin/fitctl](https://github.com/tznurmin/fitctl) (crates.io `fitctl`).
@@ -124,9 +126,11 @@ bash bin/nightly.sh                                    # consolidate + critic + 
 
 For systemd, the units in `systemd/` are parametrized templates — set the
 `$AION_HOME`-equivalent paths and install with `systemctl --user enable --now`.
-The full experiment environment (GPU scheduling, sensor embodiment, art
-pipeline) is intentionally **not** part of this core; the experiments in the
-papers need only the loop above plus Ollama.
+The sensor embodiment (rover, cameras, Home Assistant) is intentionally
+not part of this core; the experiments in the papers need only the loop
+above plus Ollama. The dream→artifact pipeline ships in `artifacts/` — it
+requires FLUX/AceStep model installations to actually render (see
+`docs/PIPELINE.md`).
 
 ## Honest limits
 

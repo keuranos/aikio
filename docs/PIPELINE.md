@@ -45,17 +45,24 @@ rendered as audible structure via AceStep; included in this repo
 | matplotlib/manim paths | LLM-authored rendering code with a fix-retry loop (render errors return the traceback to the model) | in `dream_artifact.py`/`dream_matplotlib.py`, deployment layer |
 | Mind-graph renders | graphify-derived graph renders (networkx) | graph rebuild scripts in this repo (`bin/graph_rebuild.sh`) |
 
-## Why the image generators are not in this repo
+## The artifact modules in this repo
 
-The cognitive-loop experiments in the papers (axiom swap, autonomous
-introspection) do not consume the artifact pipeline: dreams produce
-insights/questions/proposals regardless of whether images render, and the
-J-space measurements are independent of the art path. The artifact layer
-needs a diffusion checkpoint (~12 GB VRAM), an audio model, and camera/sensor
-hardware — heavy, host-specific, and separable. The modules are cited above
-so the pipeline description in Paper 1 is fully traceable; if you want to
-run them, they are straightforward to add next to `bin/` (they follow the
-same `log_event` + episodic-memory conventions as the core).
+As of this revision the artifact layer ships in `artifacts/` next to the core:
+
+| File | Role |
+|---|---|
+| `dream_artifact.py` | dream → artifact transformer; the intuition model selects the medium (FLUX / generative matplotlib / graph render / hybrid / manim) per dream, with an LLM fix-retry loop for render errors |
+| `dream_matplotlib.py` | the LLM-authored matplotlib rendering path |
+| `flux_server.py` | local FLUX diffusion image server (wraps a FLUX checkpoint) |
+| `flux_prompt_v2.py` | FLUX prompt generation from dream content |
+| `acestep_proxy.py` | AceStep music-generation proxy (dream sonification, substrate compositions) |
+| `cross_modal_synthesis.py` | periodic cognitive-state visualizations on the intuition model |
+| `art_tools.py`, `visual_manifestation.py`, `create_art_session.py` | gallery/art session tooling |
+
+Upstream model requirements (not included): a FLUX diffusion checkpoint
+(~12 GB VRAM for inference) and an AceStep installation (`ACESTEP_DIR`
+environment variable). Paths are environment-driven — see
+`config/aion.env.example` and the module headers.
 
 ## Experiment-critical vs. descriptive
 
