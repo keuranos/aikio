@@ -143,6 +143,15 @@ requires FLUX/AceStep model installations to actually render (see
 - Code was extracted from a running deployment; paths are parametrized but
   the system was operated on one host. Expect to debug GPU/env specifics.
 
+## Credits
+
+The Jacobian lens instrument is Anthropic's
+[`jlens` library](https://github.com/anthropics/jacobian-lens)
+(companion code for *"Verbalizable Representations Form a Global Workspace in
+Language Models"*, Apache-2.0), fitted here to Qwen3.8-27B. The probe daemon
+(`bin/jspace_probe.py`) integrates it as an aion tool. All other code in this
+repository is the project's own.
+
 ## License
 
 MIT for code. The identity documents (AXIOMS.md, HEURISTICS.md, SELF.md,
