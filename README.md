@@ -100,6 +100,36 @@ The dream→artifact pipeline (FLUX / matplotlib / manim / AceStep) and `fitctl`
   grades its own family's output).
 - ~2 GB VRAM headroom for the introspection daemon (NF4-quantized 27B + lens).
 
+## Dependencies
+
+Python 3.10+. The cognitive loop itself is stdlib + Ollama. The
+introspection instrument and artifact pipeline need:
+
+```bash
+pip install -r requirements.txt
+```
+
+- **Instrument** (`bin/jspace_probe.py`): `torch`, `transformers>=5.5`,
+  `bitsandbytes`, `accelerate`, plus Anthropic's
+  [`jlens`](https://github.com/anthropics/jacobian-lens)
+  (`pip install git+https://github.com/anthropics/jacobian-lens`).
+  A *fitted* lens (`.pt`) is not included — see
+  [`keuranos/aion-jspace`](https://github.com/keuranos/aion-jspace) for how
+  the shipped one was produced (`JacobianLens.fit` on the agent's own
+  weights; `checkpoint.pt` format in the jlens repo).
+- **Artifacts** (`bin/art_tools.py`, LLM-authored renders):
+  `matplotlib`, `numpy`, `scipy`.
+- **Optional services**: `diffusers` only for `artifacts/flux_server.py`
+  (local FLUX; the loop skips the FLUX medium when it's absent); `docker`
+  CLI only for `bin/docker_sandbox.py` (the stdlib `bin/sandbox.py` works
+  without); `manim` only for the manim medium.
+- **fitctl** (Rust, [github.com/tznurmin/fitctl](https://github.com/tznurmin/fitctl)):
+  not imported by any module here — the deployment's sensor stream polls it
+  as an external binary for host-FIT verdicts (see `docs/PIPELINE.md`).
+  Install separately if you replicate that part.
+- Everything else runs against a stock [Ollama](https://ollama.com) install
+  (see Hardware / models below).
+
 ## Quickstart (Linux + NVIDIA, Ollama)
 
 ```bash
@@ -108,19 +138,23 @@ export AION_HOME=$HOME/aikio          # or any writable dir
 mkdir -p $AION_HOME/bin $AION_HOME/prompts $AION_HOME/config $AION_HOME/memory/episodic $AION_HOME/memory/state
 cp bin/*.py $AION_HOME/bin/ ; cp bin/*.sh $AION_HOME/bin/ ; cp prompts/*.txt $AION_HOME/prompts/
 
-# 2. config
+# 2. dependencies (introspection instrument + artifact pipeline)
+python3 -m venv ~/.venvs/aikio && source ~/.venvs/aikio/bin/activate
+pip install -r /path/to/aikio/requirements.txt
+
+# 3. config
 cp config/aion.env.example $AION_HOME/config/aion.env   # fill in model names/URLs
 # point every OLLAMA_*_URL at your Ollama instance(s)
 
-# 3. identity
+# 4. identity
 cp identity/AXIOMS.md $AION_HOME/AXIOMS.md             # edit: this is the constitution
 cd $AION_HOME && python3 bin/regenerate_prompt.py      # builds SYSTEM_PROMPT.md
 
-# 4. run one cycle by hand
+# 5. run one cycle by hand
 cd $AION_HOME && python3 bin/curiosity_engine.py select
 python3 bin/curiosity_engine.py pursue                 # ~5 min; logs to episodic/
 
-# 5. nightly consolidation
+# 6. nightly consolidation
 bash bin/nightly.sh                                    # consolidate + critic + maturity
 ```
 

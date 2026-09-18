@@ -7,6 +7,14 @@ readout of what concepts actually activate, layer by layer, while answering.
 
 Design:
   - Lazy load: starts at 0 VRAM; model+lens load on first request
+  - Dynamic GPU pick (Sep 13, operator direction): with no JSPACE_DEVICE env,
+    the daemon chooses at LOAD time the GPU with the most free VRAM that fits
+    (nvidia-smi), never the muse card, gemma4's card only as last resort.
+    This is the scheduler idea applied to a non-ollama process: jspace cannot
+    be placed by :11500 (raw PyTorch, speaks no ollama), so it places itself.
+  - Self-stopping: after idle unload the process EXITS (on-demand systemd
+    unit, Restart=on-failure stays down on exit 0); a daemon that has never
+    served a probe exits on its own too. Clients restart it as needed.
   - VRAM conflict handling: if muse-glimmer occupies the GPU, unload it first
     (ollama reloads it automatically on next use — same drain pattern as rover)
   - Engagement/deflection signature analysis based on the 2026-08-24 axiom
@@ -42,13 +50,40 @@ MODEL_NAME = os.environ.get("JSPACE_MODEL", "Qwen/Qwen3.8-27B")
 LENS_PATH = os.environ.get(
     "JSPACE_LENS", os.path.expanduser("~/jlens-work/qwen3.8-27b_jacobian_lens.pt")
 )
-DEVICE = os.environ.get("JSPACE_DEVICE", "cuda:1")
+DEVICE = os.environ.get("JSPACE_DEVICE", "")  # empty = dynamic pick at load
 PORT = int(os.environ.get("JSPACE_PORT", "11440"))
-GPU_INDEX = os.environ.get("JSPACE_GPU_INDEX", DEVICE.split(":")[-1] if ":" in DEVICE else "1")
+GPU_INDEX = os.environ.get("JSPACE_GPU_INDEX", DEVICE.split(":")[-1] if ":" in DEVICE else "")
 MAX_SEQ_LEN = int(os.environ.get("JSPACE_MAX_SEQ_LEN", "8192"))
+# Single-shot readout ceiling (measured 2026-09-17): a single forward over
+# ~8800 tok OOMs on a 32GB V100 (24*seq^2*4 fp32 math-attention scores);
+# 7997 tok OK / 8808 OOM. Probes ABOVE this limit run through the chunked
+# prefill readout (readout_chunked) instead - fidelity measured: engagement
+# delta 0.0000, emitted top-10 identical, 62/63 layers identical top-1.
+CHUNK_SINGLE_SHOT_MAX = int(os.environ.get("JSPACE_CHUNK_SINGLE_SHOT_MAX", "7600"))
+CHUNK_SIZE = int(os.environ.get("JSPACE_CHUNK", "512"))
 # Unload model after this many seconds idle, freeing VRAM for muse-glimmer
 # (intuition model shares this GPU; both resident = OOM). 0 = never unload.
 IDLE_UNLOAD_S = int(os.environ.get("JSPACE_IDLE_UNLOAD_S", "900"))
+# On-demand unit self-stop: if no probe has EVER connected within this
+# window, exit. Guards the Sep 13 failure shape: daemon alive for 3-19h
+# with the model unloaded because the client-side stop timer died with its
+# one-shot host process (curiosity cycle / wake_v2). exit 0 -> unit stays
+# down; the next probe restarts us via jspace_tool._ensure_daemon.
+STARTUP_IDLE_EXIT_S = int(os.environ.get("JSPACE_STARTUP_IDLE_EXIT_S", "1800"))
+# Only drain muse-glimmer when THIS daemon's GPU is the muse GPU. The Sep 13
+# repin to GPU0 (gemma4's card) made the old unconditional drain unload muse
+# from the WRONG GPU before OOMing anyway — evicting aion's only sanctioned
+# resident for nothing.
+MUSE_GPU = os.environ.get(
+    "JSPACE_MUSE_GPU", "")  # set in deployment env; UUIDs are host-specific
+MUSE_URL = os.environ.get("JSPACE_MUSE_URL", "http://localhost:11438")
+# gemma4's card: never preferred — used only when it is the ONLY card that
+# fits (i.e. gemma4 keep_alive expired). A probe there must not evict gemma4;
+# ollama admission will simply queue main-model requests until jspace idles
+# out (IDLE_UNLOAD_S + self-exit), which is the accepted cost.
+MAIN_GPU = os.environ.get(
+    "JSPACE_MAIN_GPU", "GPU-c50e233e-1ad0-bae4-8704-f5af5a817bd4")
+MIN_FREE_MB = int(os.environ.get("JSPACE_MIN_FREE_MB", "20000"))
 
 # --- Signature lexicon (empirical, from the axiom experiment 2026-08-24) ---
 ENGAGEMENT_TOKENS = {
@@ -79,10 +114,11 @@ KEY_CONCEPTS = [  # tracked individually: (display name, token matches)
 
 # ────────────────────────── GPU management ──────────────────────────
 
-def gpu_free_mb():
+def gpu_free_mb(index_or_uuid=None):
+    target = index_or_uuid or GPU_INDEX or "0"
     r = subprocess.run(
         ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits",
-         "-i", GPU_INDEX],
+         "-i", target],
         capture_output=True, text=True,
     )
     try:
@@ -91,13 +127,58 @@ def gpu_free_mb():
         return 0
 
 
+def list_gpus():
+    """All GPUs: index, uuid, free MB (nvidia-smi order = PCI_BUS_ID order,
+    which matches cuda:N inside this process via CUDA_DEVICE_ORDER env)."""
+    r = subprocess.run(
+        ["nvidia-smi", "--query-gpu=index,uuid,memory.free",
+         "--format=csv,noheader,nounits"],
+        capture_output=True, text=True,
+    )
+    out = []
+    for line in r.stdout.strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 3:
+            try:
+                out.append({"index": parts[0], "uuid": parts[1],
+                            "free_mb": int(parts[2])})
+            except ValueError:
+                pass
+    return out
+
+
+def pick_gpu(min_free_mb=MIN_FREE_MB):
+    """Scheduler-style placement for a non-ollama process.
+
+    Rules (operator law): muse-glimmer's card is NEVER a candidate (muse is
+    the only sanctioned resident). gemma4's card qualifies only as last
+    resort. Among the rest, most free VRAM wins. Returns (gpu|None, all).
+    """
+    cands = list_gpus()
+    qualifying = [g for g in cands
+                  if g["free_mb"] >= min_free_mb and MUSE_GPU not in g["uuid"]]
+    if not qualifying:
+        return None, cands
+    qualifying.sort(key=lambda g: (MAIN_GPU in g["uuid"], -g["free_mb"]))
+    return qualifying[0], cands
+
+
 def drain_intuition_if_needed(needed_mb=21000):
-    """If muse-glimmer holds the GPU, unload it. Ollama reloads on next use."""
+    """If muse-glimmer holds OUR GPU, unload it. Ollama reloads on next use.
+
+    Skipped when pinned to a different card: a shortfall there means another
+    resident (e.g. gemma4) is in the way, and draining muse would evict
+    Aion's always-resident intuition model for nothing.
+    """
+    if GPU_INDEX != MUSE_GPU:
+        print(f"[jspace] pinned to {GPU_INDEX}, muse lives on {MUSE_GPU}"
+              " — skip muse drain", file=sys.stderr)
+        return
     if gpu_free_mb() >= needed_mb:
         return
     try:
         subprocess.run(
-            ["curl", "-s", "http://localhost:11438/api/generate",
+            ["curl", "-s", f"{MUSE_URL}/api/generate",
              "-d", json.dumps({"model": "muse-glimmer:latest", "keep_alive": 0,
                                "prompt": ""})],
             capture_output=True, timeout=30,
@@ -122,7 +203,12 @@ class ProbeEngine:
         self.tokenizer = None
         self.lens = None
         self.lens_model = None
-        self.last_used = 0.0
+        self.chosen_index = None
+        self.chosen_uuid = None
+        self.started_at = time.time()
+        self.last_activity = self.started_at
+        self.probes_started = 0
+        self.probes_finished = 0
         if IDLE_UNLOAD_S > 0:
             t = threading.Thread(target=self._idle_watch, daemon=True)
             t.start()
@@ -130,21 +216,40 @@ class ProbeEngine:
     def _idle_watch(self):
         while True:
             time.sleep(60)
-            if self.model is None:
-                continue
-            if time.time() - self.last_used > IDLE_UNLOAD_S:
+            if self.probes_started > self.probes_finished:
+                continue  # probe in flight (cold load or lens apply)
+            idle_for = time.time() - self.last_activity
+            if self.model is not None and idle_for > IDLE_UNLOAD_S:
                 with self.lock:
                     if self.model is None:
                         continue
-                    if time.time() - self.last_used <= IDLE_UNLOAD_S:
+                    if time.time() - self.last_activity <= IDLE_UNLOAD_S:
                         continue
                     print("[jspace] idle unload — freeing VRAM for muse-glimmer",
                           file=sys.stderr)
                     self._unload_locked()
+                    # _unload_locked os._exit(3)s itself if VRAM stayed pinned;
+                    # reaching this line means VRAM is actually free. Stop the
+                    # unit too so the process (CUDA context ~0.7GB) never
+                    # squats idle for hours — the Sep 13 failure shape.
+                    sys.stderr.flush()
+                    print("[jspace] unloaded — daemon exiting (on-demand unit)",
+                          file=sys.stderr)
+                    os._exit(0)
+            if self.model is None and idle_for > STARTUP_IDLE_EXIT_S:
+                sys.stderr.flush()
+                print(f"[jspace] no probe used this daemon for "
+                      f"{int(idle_for)}s — exiting (on-demand unit)",
+                      file=sys.stderr)
+                os._exit(0)
 
     def _unload_locked(self):
         import gc, torch, time as _t
-        before = gpu_free_mb()
+        # Verify by UUID: PCI index order is unstable on identical V100s and
+        # can flip mid-process; the CUDA context stays on the physical card
+        # chosen at load regardless.
+        target = self.chosen_uuid or self.chosen_index
+        before = gpu_free_mb(target)
         self.model = None
         self.lens = None
         self.lens_model = None
@@ -162,7 +267,7 @@ class ProbeEngine:
         torch.cuda.empty_cache()
         freed = False
         for _ in range(6):
-            free = gpu_free_mb()
+            free = gpu_free_mb(target)
             print(f"[jspace] unloaded, gpu_free={free}MB", file=sys.stderr)
             if free >= max(15000, before + 5000):
                 freed = True
@@ -180,6 +285,22 @@ class ProbeEngine:
     def ensure_loaded(self):
         if self.model is not None:
             return
+        global DEVICE, GPU_INDEX
+        if not DEVICE:
+            chosen, cands = pick_gpu()
+            if chosen is None:
+                raise RuntimeError(
+                    f"no GPU with >= {MIN_FREE_MB}MB free (muse card excluded): "
+                    f"{cands}")
+            DEVICE = f"cuda:{chosen['index']}"
+            GPU_INDEX = chosen["index"]
+            self.chosen_index = chosen["index"]
+            self.chosen_uuid = chosen["uuid"]
+            print(f"[jspace] dynamic pick: {chosen['uuid']} "
+                  f"(cuda:{chosen['index']}, {chosen['free_mb']}MB free)",
+                  file=sys.stderr)
+        elif self.chosen_index is None:
+            self.chosen_index = GPU_INDEX
         import torch
         from transformers import Qwen3_5ForCausalLM, BitsAndBytesConfig
         import jlens
@@ -204,17 +325,121 @@ class ProbeEngine:
         print(f"[jspace] ready: {type(self.model).__name__}, lens={LENS_PATH}",
               file=sys.stderr)
 
-    def probe(self, prompt, topk=10, system=None):
-        self.ensure_loaded()
-        self.last_used = time.time()
-        import jlens
+    def readout_chunked(self, text, chunk=None):
+        """Last-position residual at every lens layer, via chunked prefill.
 
-        full = (system + "\n\n" + prompt) if system else prompt
-        with self.lock:
-            lens_logits, model_logits, _ = self.lens.apply(
-                self.lens_model, full, positions=[-1],
-                max_seq_len=MAX_SEQ_LEN,
-            )
+        Same math as bin/jspace_identity_probe_operator.py (fidelity
+        verified 2026-09-17: engagement delta 0.0000 vs single-shot,
+        emitted top-10 identical, 62/63 layers identical top-1). Used
+        when the input exceeds CHUNK_SINGLE_SHOT_MAX tokens, where a
+        single forward OOMs on V100.
+        Returns (lens_logits, model_logits, n_tokens).
+        """
+        import torch
+
+        if chunk is None:
+            chunk = CHUNK_SIZE
+        ids = self.tokenizer(text, return_tensors="pt").input_ids[0].to(DEVICE)
+        n = ids.shape[0]
+        layers = list(self.lens.source_layers)
+        final_layer = self.lens_model.n_layers - 1
+        record_at = sorted(set(layers) | {final_layer})
+        store = {}
+
+        def make_hook(idx):
+            def hook(module, inputs, output):
+                t = output if torch.is_tensor(output) else output[0]
+                store[idx] = t[0, -1, :].detach().clone()  # clone: view pins base
+            return hook
+
+        if n <= chunk:
+            chunks = [ids]
+        else:
+            chunks = [ids[i:i + chunk] for i in range(0, n, chunk)]
+
+        past = None
+        handles = []
+        try:
+            with torch.no_grad():
+                for ci, ch in enumerate(chunks):
+                    is_last = (ci == len(chunks) - 1)
+                    if is_last:
+                        for idx in record_at:
+                            handles.append(
+                                self.model.model.layers[idx]
+                                .register_forward_hook(make_hook(idx)))
+                    out = self.model(input_ids=ch.unsqueeze(0),
+                                     use_cache=True,
+                                     past_key_values=past)
+                    past = out.past_key_values
+                    if is_last:
+                        for h in handles:
+                            h.remove()
+                        handles = []
+        finally:
+            for h in handles:
+                h.remove()
+
+        lens_logits = {}
+        for L in layers:
+            residual = store[L].float().unsqueeze(0)
+            residual = self.lens.transport(residual, L)
+            lens_logits[L] = self.lens_model.unembed(residual).float().cpu()
+        model_logits = self.lens_model.unembed(
+            store[final_layer].float().unsqueeze(0)).float().cpu()
+        del past
+        torch.cuda.empty_cache()
+        return lens_logits, model_logits, n
+
+    def probe(self, prompt, topk=10, system=None):
+        self.probes_started += 1
+        self.last_activity = time.time()
+        readout_mode = "single_shot"
+        n_tok = 0
+        try:
+            self.ensure_loaded()
+            import jlens
+
+            full = (system + "\n\n" + prompt) if system else prompt
+            # TRUNCATION GUARD (added 2026-09-17). jlens encode() truncates
+            # with the tokenizer default truncation_side ('right'), so a
+            # system prompt longer than MAX_SEQ_LEN silently DELETES the
+            # probe question. That is how every identity probe becomes an
+            # artifact the moment SYSTEM_PROMPT.md crosses the limit
+            # (2026-09-17: 8799 tok > 8192 -> the question left the input).
+            # A readout whose input silently lost its question is not a
+            # measurement. Refuse, and say exactly what is wrong.
+            n_full = len(self.tokenizer.encode(full))
+            if n_full > MAX_SEQ_LEN:
+                side = getattr(self.tokenizer, "truncation_side", "right")
+                raise ValueError(
+                    "INPUT WOULD BE TRUNCATED: {} tokens > JSPACE_MAX_SEQ_LEN "
+                    "{} (truncation_side={!r}). With side='right' the tail is "
+                    "dropped, which means the PROBE QUESTION IS REMOVED and "
+                    "the readout would describe only a truncated system "
+                    "prompt. Refusing to emit a meaningless measurement. "
+                    "Fix: set JSPACE_MAX_SEQ_LEN to at least {} (systemd unit "
+                    "Environment=), or shorten the system prompt.".format(
+                        n_full, MAX_SEQ_LEN, side, n_full + 512)
+                )
+            with self.lock:
+                if n_full > CHUNK_SINGLE_SHOT_MAX:
+                    # Chunked prefill readout (validated 2026-09-17):
+                    # engagement delta 0.0000 vs single-shot. Recorded
+                    # in the result so provenance travels with it.
+                    readout_mode = "chunked_prefill(chunk=%d)" % CHUNK_SIZE
+                    lens_logits, model_logits, n_tok = \
+                        self.readout_chunked(full)
+                else:
+                    readout_mode = "single_shot"
+                    lens_logits, model_logits, _ = self.lens.apply(
+                        self.lens_model, full, positions=[-1],
+                        max_seq_len=MAX_SEQ_LEN,
+                    )
+                    n_tok = n_full
+        finally:
+            self.probes_finished += 1
+            self.last_activity = time.time()
 
         def top_pairs(logits, k):
             t = logits[0].topk(k)
@@ -229,7 +454,8 @@ class ProbeEngine:
         model_output = top_pairs(model_logits, topk)
         signature = analyze_signature(layers)
         return {"model_output": model_output, "layers": layers,
-                "signature": signature}
+                "signature": signature, "readout": readout_mode,
+                "n_tokens": n_tok}
 
 
 ENGINE = ProbeEngine()

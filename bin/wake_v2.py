@@ -21,7 +21,7 @@ from jspace_tool import tool_jspace_probe, JSPACE_TOOL_DESCRIPTION
 
 AION = os.environ.get("AION_HOME", "$AION_HOME")
 MAIN_URL = os.environ.get("OLLAMA_MAIN_URL", "http://localhost:11436")
-MAIN_MODEL = os.environ.get("MAIN_MODEL", "gemma4:31b-65k")
+MAIN_MODEL = os.environ.get("MAIN_MODEL", "gemma4:31b")
 NUM_CTX = int(os.environ.get("MAIN_NUM_CTX", "65536"))
 
 MAX_TOOL_CALLS = 8
@@ -126,6 +126,20 @@ def boot_context():
     ]
     if felt_section:
         sections.append(felt_section)
+    # Phase-1c (2026-09-12): inherit the always-on layer's rolling self-thread
+    try:
+        from intuition_daemon import _read_self_thread
+        _st = _read_self_thread()
+        _thr = _st.get("thread", [])
+        if _thr:
+            _lines = [f"  - {h.get('text','')[:200]}" for h in _thr[-3:]]
+            _oq = _st.get("open_question")
+            sections.append(
+                "Your always-on intuition layer has been holding this thread while you were away:\n"
+                + "\n".join(_lines)
+                + (f"\nOpen question it carries: {_oq}".replace("{_oq}", str(_oq)) if _oq else ""))
+    except Exception:
+        pass
     if affect_state:
         sections.append(affect_state)
     # V3.6: Preactivated concepts from spreading activation
@@ -501,8 +515,16 @@ def chat_with_tools(prompt, seed):
     ]
     
     tool_calls_used = 0
-    
-    while tool_calls_used < MAX_TOOL_CALLS:
+    # 2026-09-15: HARD model-round cap. tool_calls_used only increments on
+    # recognized tools; a model that keeps emitting unparseable/unknown <tool>
+    # JSON loops forever on a growing transcript (seen live: 166 rounds, one
+    # ~20k-token muse request every ~4.9s until the process was killed).
+    model_rounds = 0
+    MAX_MODEL_ROUNDS = 12
+
+    while (tool_calls_used < MAX_TOOL_CALLS
+           and model_rounds < MAX_MODEL_ROUNDS):
+        model_rounds += 1
         # Truncate messages to fit context (protect system prompt)
         from ctx_manager import truncate_messages_str, log_context_usage
         messages, summary, est = truncate_messages_str(messages, NUM_CTX - 2000, protected_prefix=1)
@@ -561,8 +583,14 @@ def chat_with_tools(prompt, seed):
                 })
         
         # If the model's last message was all tool calls with no final note,
-        # prompt it to conclude
+        # prompt it to conclude (budget exhausted OR hard round cap hit)
         if tool_calls_used >= MAX_TOOL_CALLS:
+            print("[wake_v2] tool budget exhausted")
+        elif model_rounds >= MAX_MODEL_ROUNDS:
+            print("[wake_v2] round cap %d hit; forcing conclusion"
+                  % MAX_MODEL_ROUNDS)
+        if (tool_calls_used >= MAX_TOOL_CALLS
+                or model_rounds >= MAX_MODEL_ROUNDS):
             messages.append({
                 "role": "user",
                 "content": "You've used all your tool calls. Write your final resolution note now using write_note."
@@ -584,6 +612,8 @@ def chat_with_tools(prompt, seed):
             except Exception:
                 pass
 
+    print("[wake_v2] loop ended after %d model rounds / %d tool calls"
+          % (model_rounds, tool_calls_used))
     return "Tool budget exhausted without resolution note.", tool_calls_used
 
 def log(type_, text, meta=None):

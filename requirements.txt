@@ -1,0 +1,43 @@
+# Aikio — Python dependencies
+#
+# Core cognitive loop (bin/*.py) runs on stdlib + Ollama; the introspection
+# instrument and artifact pipeline need the packages below.
+#
+# Python 3.10+. See README "Hardware / models" for Ollama + model requirements.
+
+# ── introspection instrument (bin/jspace_probe.py) ─────────────────────────
+# torch/bitsandbytes: NF4-quantized inference of the agent's own model.
+# transformers >= 5.5 required for the Qwen3.5/Qwen3.8 architecture.
+torch>=2.4
+transformers>=5.5
+accelerate
+bitsandbytes
+# Anthropic's Jacobian lens (Apache-2.0) — residual-stream -> vocabulary
+# transport. Install from source: pip install git+https://github.com/anthropics/jacobian-lens
+# A fitted lens (.pt) is NOT included here; see keuranos/aion-jspace README.
+
+# ── artifact pipeline ──────────────────────────────────────────────────────
+# bin/art_tools.py + LLM-authored rendering (visual dreams)
+matplotlib
+# bin/substrate_composition.py (WAV mixing); sandboxed LLM code also uses it
+numpy
+scipy
+
+# ── optional / deployment-layer services ───────────────────────────────────
+# diffusers + accelerate: only for artifacts/flux_server.py (local FLUX image
+# server). The cognitive loop runs fine without it — dream_artifact skips
+# the FLUX medium when the server is absent.
+# diffusers
+#
+# docker CLI: only for bin/docker_sandbox.py (Tier-2 code execution).
+# The stdlib subprocess sandbox (bin/sandbox.py) works without it.
+#
+# manim: only if you enable the manim medium in dream_artifact.
+#
+# fitctl (Rust binary, github.com/tznurmin/fitctl, crates.io): NOT imported
+# by any module in this repo — docs/PIPELINE.md describes it as an optional
+# external tool the deployment's sensor stream polls for host-FIT verdicts.
+# Install separately if you replicate that part of the deployment.
+#
+# Ollama (https://ollama.com) serves all models; the scheduler (:11500 in
+# the papers) is a deployment-layer service, not shipped here.

@@ -42,7 +42,7 @@ except Exception:
 
 AION = os.environ.get("AION_HOME", "$AION_HOME")
 MAIN_URL = os.environ.get("OLLAMA_MAIN_URL", "http://localhost:11436")
-MAIN_MODEL = os.environ.get("MAIN_MODEL", "gemma4:31b-65k")
+MAIN_MODEL = os.environ.get("MAIN_MODEL", "gemma4:31b")
 NUM_CTX = int(os.environ.get("MAIN_NUM_CTX", "65536"))
 QUESTIONS_FILE = f"{AION}/memory/state/questions.json"
 GOALS_FILE = f"{AION}/memory/state/active_goals.json"
@@ -50,7 +50,9 @@ LEDGER_FILE = f"{AION}/memory/state/curiosity_ledger.jsonl"
 DREAM_THREADS_FILE = f"{AION}/memory/dreams/threads.json"
 PROMPT_FILE = f"{AION}/prompts/curiosity_investigate.txt"
 
-TOOL_BUDGET_PER_CYCLE = 8
+# 2026-09-13: 8 -> 12 (thinking models exhausted 8/8 twice on the -1.0 goal;
+# more tool room + bigger num_predict for the structured resolution)
+TOOL_BUDGET_PER_CYCLE = int(os.environ.get("CURIOSITY_TOOL_BUDGET", "12"))
 MAX_CYCLES_PER_GOAL = 5
 MAX_ACTIVE_GOALS = 5
 QUESTION_DECAY_DAYS = 7  # archive questions older than this with no investigation
@@ -120,7 +122,10 @@ SOURCE_WEIGHTS = {
     "code_engineering": 1.5,  # V3.0.7: engineering questions — highest priority
     "construction": 1.6,  # V3.8: constructive engineering tasks — top priority
     "dream_repair": 1.7,  # V3.10: dream-grounded self-repair tasks — never runs dry
+    "council": 1.45,      # V4.4: council deliberations - multi-model deliberated,
+                            # below construction (specific defect) above follow_up
 }
+
 
 # V3.9: Engineering drive — keywords that signal BUILDING, not just THINKING
 # Questions containing these get an engineering bonus on top of source weight
@@ -815,6 +820,30 @@ def tool_visual_manifestation(args):
         return f"Error: visual manifestation failed: {e}"
 
 
+def tool_consult_big(args):
+    """Escalate to the big consult model (qwen3.8-flash-next via llama.cpp).
+    Queues the request with the scheduler; runs when all 3 GPUs are free.
+    args: {"question": str, "context": str (findings so far), "max_tokens": int}
+    """
+    import urllib.request
+    payload = json.dumps({
+        "question": (args or {}).get("question", ""),
+        "context": (args or {}).get("context", ""),
+        "max_tokens": (args or {}).get("max_tokens", 800),
+    }).encode()
+    url = os.environ.get("OLLAMA_MAIN_URL", "http://localhost:11500") + "/api/consult"
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.loads(r.read())
+
+
+def tool_consult_status(args):
+    import urllib.request
+    url = os.environ.get("OLLAMA_MAIN_URL", "http://localhost:11500") + "/api/consult/status"
+    with urllib.request.urlopen(url, timeout=15) as r:
+        return json.loads(r.read())
+
+
 def tool_sandbox(args):
     """Run code in the empirical sandbox."""
     code = args.get("code", "")
@@ -850,6 +879,8 @@ TOOLS.update({
     "visual_manifestation": tool_visual_manifestation,
     "jspace_probe": tool_jspace_probe,
     "council": tool_council,
+    "consult_big": tool_consult_big,
+    "consult_status": tool_consult_status,
 })
 
 
@@ -934,6 +965,14 @@ def run_investigation(goal):
         tool_descriptions=TOOL_DESCRIPTIONS,
         tool_budget=TOOL_BUDGET_PER_CYCLE,
     )
+    # 2026-09-13: council escalation hint from a previous stuck cycle
+    hint = goal.get("approach_hint")
+    if hint:
+        prompt += (
+            "\n\n## APPROACH HINT (from an internal council convened when a previous"
+            " attempt got stuck - try this angle first, it came from a different model)\n"
+            + hint
+        )
 
     # V3.0.7: For engineering questions, add a nudge to propose actual fixes
     # V3.8: Extended to construction tasks with cycle-aware urgency
@@ -1119,7 +1158,7 @@ def chat_with_tools(prompt, cycle_num):
             "model": MAIN_MODEL, "stream": False,
             "messages": messages,
             "think": False,
-            "options": {"num_ctx": NUM_CTX, "temperature": 0.6, "num_predict": 4096},
+            "options": {"num_ctx": NUM_CTX, "temperature": 0.6, "num_predict": 8192},
         }).encode()
 
         try:
@@ -1216,6 +1255,13 @@ def chat_with_tools(prompt, cycle_num):
                 resolution = parse_resolution(final_reply)
                 if resolution:
                     resolution.setdefault("resolution_cause", "budget_exhausted")
+                # 2026-09-13: escalation ladder - council on stuck investigations
+                if cycle >= 1 and not goal.get("escalated_cycle"):
+                    hint = _escalate(goal, resolution.get("answer", ""), cycle)
+                    if hint:
+                        goal["approach_hint"] = hint[:1500]
+                        goal["escalated_cycle"] = cycle
+                        resolution["escalated"] = True
                     # Safety: if model said "resolved" under budget pressure, downgrade
                     if resolution.get("status") == "resolved" and resolution.get("confidence", 0) < 0.5:
                         resolution["status"] = "in_progress"
@@ -1377,6 +1423,39 @@ def complete_goal(goal, resolution):
 
 
 # ─── The pursue command ────────────────────────────────────────────
+
+
+
+# --- 2026-09-13: escalation ladder (operator) -------------------------------
+# When the investigating model hits the wall (budget_exhausted / model_failure),
+# convene the internal council on the question with the failed findings; the
+# council's suggested new approach is stored on the goal as approach_hint and
+# the next cycle's investigation prompt carries it. Council quorum is adaptive
+# (philosophical -> muse, engineering -> code, unknown -> full three), so a
+# DIFFERENT model effectively gets a try.
+def _escalate_stuck(goal, answer, cycle):
+    """Council on a stuck investigation. Returns approach_hint text or None."""
+    try:
+        from internal_council import convene
+        purpose = "engineering" if "engineering" in str(goal.get("source", "")) or "construction" in str(goal.get("source", "")) else "reflection"
+        result = convene(
+            topic=f"Investigation stuck (cycle {cycle}/5): {goal.get('question', '')[:200]}",
+            context=f"The investigating model exhausted its budget. What it found so far:\n{(answer or '')[:1200]}\n\nWhat should it try next? Suggest a concrete alternative approach, different tool path, or reframing. One paragraph."
+            , purpose=purpose, max_rounds=1)
+        conclusion = result.get("conclusion") or ""
+        if not conclusion:
+            # take last non-chair utterance as the approach
+            for role, text in reversed(result.get("transcript", [])):
+                if role != "chair" and text:
+                    conclusion = text
+                    break
+        if conclusion:
+            print(f"[curiosity] escalated to council ({purpose}); approach hint produced", flush=True)
+            return conclusion[:800]
+    except Exception as e:
+        print(f"[curiosity] escalation failed (non-fatal): {e}", flush=True)
+    return None
+
 
 def pursue():
     """Run one investigation cycle on the top goal.
@@ -1586,7 +1665,7 @@ def answer_question(question_text, operator_answer):
     log_event("curiosity_satisfied", operator_answer, {
         "source": "operator",
         "question": qtext,
-        "operator": "the operator",
+        "operator": "Operator",
         "confidence": 1.0,
         "resolution_cause": "operator",
     })
